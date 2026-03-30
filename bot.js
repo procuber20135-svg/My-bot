@@ -1,47 +1,95 @@
-require("dotenv").config();
-require("module-alias/register");
+const {
+  EmbedBuilder,
+  ButtonBuilder,
+  ActionRowBuilder,
+  ApplicationCommandOptionType,
+  ButtonStyle,
+} = require("discord.js");
+const { timeformat } = require("@helpers/Utils");
+const { EMBED_COLORS, SUPPORT_SERVER, DASHBOARD } = require("@root/config.js");
+const botstats = require("../shared/botstats");
 
-// register extenders
-require("@helpers/extenders/Message");
-require("@helpers/extenders/Guild");
-require("@helpers/extenders/GuildChannel");
+/**
+ * @type {import("@structures/Command")}
+ */
+module.exports = {
+  name: "bot",
+  description: "bot related commands",
+  category: "INFORMATION",
+  botPermissions: ["EmbedLinks"],
+  command: {
+    enabled: false,
+  },
+  slashCommand: {
+    enabled: true,
+    options: [
+      {
+        name: "invite",
+        description: "get bot's invite",
+        type: ApplicationCommandOptionType.Subcommand,
+      },
+      {
+        name: "stats",
+        description: "get bot's statistics",
+        type: ApplicationCommandOptionType.Subcommand,
+      },
+      {
+        name: "uptime",
+        description: "get bot's uptime",
+        type: ApplicationCommandOptionType.Subcommand,
+      },
+    ],
+  },
 
-const { checkForUpdates } = require("@helpers/BotUtils");
-const { initializeMongoose } = require("@src/database/mongoose");
-const { BotClient } = require("@src/structures");
-const { validateConfiguration } = require("@helpers/Validator");
+  async interactionRun(interaction) {
+    const sub = interaction.options.getSubcommand();
+    if (!sub) return interaction.followUp("Not a valid subcommand");
 
-validateConfiguration();
-
-// initialize client
-const client = new BotClient();
-client.loadCommands("src/commands");
-client.loadContexts("src/contexts");
-client.loadEvents("src/events");
-
-// find unhandled promise rejections
-process.on("unhandledRejection", (err) => client.logger.error(`Unhandled exception`, err));
-
-(async () => {
-  // check for updates
-  await checkForUpdates();
-
-  // start the dashboard
-  if (client.config.DASHBOARD.enabled) {
-    client.logger.log("Launching dashboard");
-    try {
-      const { launch } = require("@root/dashboard/app");
-
-      // let the dashboard initialize the database
-      await launch(client);
-    } catch (ex) {
-      client.logger.error("Failed to launch dashboard", ex);
+    // Invite
+    if (sub === "invite") {
+      const response = botInvite(interaction.client);
+      try {
+        await interaction.user.send(response);
+        return interaction.followUp("Check your DM for my information! :envelope_with_arrow:");
+      } catch (ex) {
+        return interaction.followUp("I cannot send you my information! Is your DM open?");
+      }
     }
-  } else {
-    // initialize the database
-    await initializeMongoose();
+
+    // Stats
+    else if (sub === "stats") {
+      const response = botstats(interaction.client);
+      return interaction.followUp(response);
+    }
+
+    // Uptime
+    else if (sub === "uptime") {
+      await interaction.followUp(`My Uptime: \`${timeformat(process.uptime())}\``);
+    }
+  },
+};
+
+function botInvite(client) {
+  const embed = new EmbedBuilder()
+    .setAuthor({ name: "Invite" })
+    .setColor(EMBED_COLORS.BOT_EMBED)
+    .setThumbnail(client.user.displayAvatarURL())
+    .setDescription("Hey there! Thanks for considering to invite me\nUse the button below to navigate where you want");
+
+  // Buttons
+  let components = [];
+  components.push(new ButtonBuilder().setLabel("Invite Link").setURL(client.getInvite()).setStyle(ButtonStyle.Link));
+
+  if (SUPPORT_SERVER) {
+    components.push(new ButtonBuilder().setLabel("Support Server").setURL(SUPPORT_SERVER).setStyle(ButtonStyle.Link));
   }
 
-  // start the client
-  await client.login(process.env.BOT_TOKEN);
-})();
+  if (DASHBOARD.enabled) {
+    components.push(
+      new ButtonBuilder().setLabel("Dashboard Link").setURL(DASHBOARD.baseURL).setStyle(ButtonStyle.Link)
+    );
+  }
+
+  let buttonsRow = new ActionRowBuilder().addComponents(components);
+  return { embeds: [embed], components: [buttonsRow] };
+}
