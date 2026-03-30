@@ -4,24 +4,25 @@ const { musicValidations } = require("@helpers/BotUtils");
  * @type {import("@structures/Command")}
  */
 module.exports = {
-  name: "pause",
-  description: "pause the music player",
+  name: "stop",
+  description: "stop the music player",
   category: "MUSIC",
   validations: musicValidations,
   command: {
     enabled: true,
+    aliases: ["leave"],
   },
   slashCommand: {
     enabled: true,
   },
 
   async messageRun(message, args) {
-    const response = pause(message);
+    const response = await stop(message);
     await message.safeReply(response);
   },
 
   async interactionRun(interaction) {
-    const response = pause(interaction);
+    const response = await stop(interaction);
     await interaction.followUp(response);
   },
 };
@@ -29,10 +30,9 @@ module.exports = {
 /**
  * @param {import("discord.js").CommandInteraction|import("discord.js").Message} arg0
  */
-function pause({ client, guildId }) {
+async function stop({ client, guildId }) {
   const player = client.musicManager.getPlayer(guildId);
-  if (player.paused) return "The player is already paused.";
-
-  player.pause(true);
-  return "⏸️ Paused the music player.";
+  player.disconnect();
+  await client.musicManager.destroyPlayer(guildId);
+  return "🎶 The music player is stopped and queue has been cleared";
 }

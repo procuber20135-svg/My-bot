@@ -1,31 +1,37 @@
+const { musicValidations } = require("@helpers/BotUtils");
+
 /**
- * @param {import('discord.js').GuildMember} member
- * @param {string} messageId
+ * @type {import("@structures/Command")}
  */
-module.exports = async (member, messageId) => {
-  if (!messageId) return "You must provide a valid message id.";
+module.exports = {
+  name: "resume",
+  description: "resumes the music player",
+  category: "MUSIC",
+  validations: musicValidations,
+  command: {
+    enabled: true,
+  },
+  slashCommand: {
+    enabled: true,
+  },
 
-  // Permissions
-  if (!member.permissions.has("ManageMessages")) {
-    return "You need to have the manage messages permissions to manage giveaways.";
-  }
+  async messageRun(message, args) {
+    const response = resumePlayer(message);
+    await message.safeReply(response);
+  },
 
-  // Search with messageId
-  const giveaway = member.client.giveawaysManager.giveaways.find(
-    (g) => g.messageId === messageId && g.guildId === member.guild.id
-  );
-
-  // If no giveaway was found
-  if (!giveaway) return `Unable to find a giveaway for messageId: ${messageId}`;
-
-  // Check if the giveaway is unpaused
-  if (!giveaway.pauseOptions.isPaused) return "This giveaway is not paused.";
-
-  try {
-    await giveaway.unpause();
-    return "Success! Giveaway unpaused!";
-  } catch (error) {
-    member.client.logger.error("Giveaway Resume", error);
-    return `An error occurred while unpausing the giveaway: ${error.message}`;
-  }
+  async interactionRun(interaction) {
+    const response = resumePlayer(interaction);
+    await interaction.followUp(response);
+  },
 };
+
+/**
+ * @param {import("discord.js").CommandInteraction|import("discord.js").Message} arg0
+ */
+function resumePlayer({ client, guildId }) {
+  const player = client.musicManager.getPlayer(guildId);
+  if (!player.paused) return "The player is already resumed";
+  player.resume();
+  return "▶️ Resumed the music player";
+}

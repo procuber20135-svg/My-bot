@@ -4,8 +4,8 @@ const { musicValidations } = require("@helpers/BotUtils");
  * @type {import("@structures/Command")}
  */
 module.exports = {
-  name: "pause",
-  description: "pause the music player",
+  name: "shuffle",
+  description: "shuffle the queue",
   category: "MUSIC",
   validations: musicValidations,
   command: {
@@ -16,12 +16,12 @@ module.exports = {
   },
 
   async messageRun(message, args) {
-    const response = pause(message);
+    const response = shuffle(message);
     await message.safeReply(response);
   },
 
   async interactionRun(interaction) {
-    const response = pause(interaction);
+    const response = shuffle(interaction);
     await interaction.followUp(response);
   },
 };
@@ -29,10 +29,8 @@ module.exports = {
 /**
  * @param {import("discord.js").CommandInteraction|import("discord.js").Message} arg0
  */
-function pause({ client, guildId }) {
+function shuffle({ client, guildId }) {
   const player = client.musicManager.getPlayer(guildId);
-  if (player.paused) return "The player is already paused.";
-
-  player.pause(true);
-  return "⏸️ Paused the music player.";
+  player.queue.shuffle();
+  return "🎶 Queue has been shuffled";
 }
