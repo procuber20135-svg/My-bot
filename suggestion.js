@@ -1,422 +1,360 @@
-const { approveSuggestion, rejectSuggestion } = require("@handlers/suggestion");
-const { parsePermissions } = require("@helpers/Utils");
-const { ApplicationCommandOptionType, ChannelType } = require("discord.js");
+const { getSettings } = require("@schemas/Guild");
+const { findSuggestion, deleteSuggestionDb } = require("@schemas/Suggestions");
+const { SUGGESTIONS } = require("@root/config");
 
-const CHANNEL_PERMS = ["ViewChannel", "SendMessages", "EmbedLinks", "ManageMessages", "ReadMessageHistory"];
+const {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  EmbedBuilder,
+  ButtonStyle,
+  TextInputStyle,
+} = require("discord.js");
+const { stripIndents } = require("common-tags");
 
 /**
- * @type {import("@structures/Command")}
+ * @param {import('discord.js').Message} message
  */
-module.exports = {
-  name: "suggestion",
-  description: "configure suggestion system",
-  category: "SUGGESTION",
-  userPermissions: ["ManageGuild"],
-  command: {
-    enabled: true,
-    minArgsCount: 2,
-    subcommands: [
-      {
-        trigger: "status <on|off>",
-        description: "enable/disable suggestion system",
-      },
-      {
-        trigger: "channel <#channel|off>",
-        description: "configure suggestion channel or disable it",
-      },
-      {
-        trigger: "appch <#channel>",
-        description: "configure approved suggestions channel or disable it",
-      },
-      {
-        trigger: "rejch <#channel>",
-        description: "configure rejected suggestions channel or disable it",
-      },
-      {
-        trigger: "approve <channel> <messageId> [reason]",
-        description: "approve a suggestion",
-      },
-      {
-        trigger: "reject <channel> <messageId> [reason]",
-        description: "reject a suggestion",
-      },
-      {
-        trigger: "staffadd <roleId>",
-        description: "add a staff role",
-      },
-      {
-        trigger: "staffremove <roleId>",
-        description: "remove a staff role",
-      },
-    ],
-  },
-  slashCommand: {
-    enabled: true,
-    ephemeral: true,
-    options: [
-      {
-        name: "status",
-        description: "enable or disable suggestion status",
-        type: ApplicationCommandOptionType.Subcommand,
-        options: [
-          {
-            name: "status",
-            description: "enabled or disabled",
-            required: true,
-            type: ApplicationCommandOptionType.String,
-            choices: [
-              {
-                name: "ON",
-                value: "ON",
-              },
-              {
-                name: "OFF",
-                value: "OFF",
-              },
-            ],
-          },
-        ],
-      },
-      {
-        name: "channel",
-        description: "configure suggestion channel or disable it",
-        type: ApplicationCommandOptionType.Subcommand,
-        options: [
-          {
-            name: "channel_name",
-            description: "the channel where suggestions will be sent",
-            type: ApplicationCommandOptionType.Channel,
-            channelTypes: [ChannelType.GuildText],
-            required: false,
-          },
-        ],
-      },
-      {
-        name: "appch",
-        description: "configure approved suggestions channel or disable it",
-        type: ApplicationCommandOptionType.Subcommand,
-        options: [
-          {
-            name: "channel_name",
-            description: "the channel where approved suggestions will be sent",
-            type: ApplicationCommandOptionType.Channel,
-            channelTypes: [ChannelType.GuildText],
-            required: false,
-          },
-        ],
-      },
-      {
-        name: "rejch",
-        description: "configure rejected suggestions channel or disable it",
-        type: ApplicationCommandOptionType.Subcommand,
-        options: [
-          {
-            name: "channel_name",
-            description: "the channel where rejected suggestions will be sent",
-            type: ApplicationCommandOptionType.Channel,
-            channelTypes: [ChannelType.GuildText],
-            required: false,
-          },
-        ],
-      },
-      {
-        name: "approve",
-        description: "approve a suggestion",
-        type: ApplicationCommandOptionType.Subcommand,
-        options: [
-          {
-            name: "channel_name",
-            description: "the channel where message exists",
-            type: ApplicationCommandOptionType.Channel,
-            channelTypes: [ChannelType.GuildText],
-            required: true,
-          },
-          {
-            name: "message_id",
-            description: "the message id of the suggestion",
-            type: ApplicationCommandOptionType.String,
-            required: true,
-          },
-          {
-            name: "reason",
-            description: "the reason for the approval",
-            type: ApplicationCommandOptionType.String,
-            required: false,
-          },
-        ],
-      },
-      {
-        name: "reject",
-        description: "reject a suggestion",
-        type: ApplicationCommandOptionType.Subcommand,
-        options: [
-          {
-            name: "channel_name",
-            description: "the channel where message exists",
-            type: ApplicationCommandOptionType.Channel,
-            channelTypes: [ChannelType.GuildText],
-            required: true,
-          },
-          {
-            name: "message_id",
-            description: "the message id of the suggestion",
-            type: ApplicationCommandOptionType.String,
-            required: true,
-          },
-          {
-            name: "reason",
-            description: "the reason for the rejection",
-            type: ApplicationCommandOptionType.String,
-            required: false,
-          },
-        ],
-      },
-      {
-        name: "staffadd",
-        description: "add a staff role",
-        type: ApplicationCommandOptionType.Subcommand,
-        options: [
-          {
-            name: "role",
-            description: "the role to add as a staff",
-            type: ApplicationCommandOptionType.Role,
-            required: true,
-          },
-        ],
-      },
-      {
-        name: "staffremove",
-        description: "staffremove a staff role",
-        type: ApplicationCommandOptionType.Subcommand,
-        options: [
-          {
-            name: "role",
-            description: "the role to staffremove from a staff",
-            type: ApplicationCommandOptionType.Role,
-            required: true,
-          },
-        ],
-      },
-    ],
-  },
+const getStats = (message) => {
+  const upVotes = (message.reactions.resolve(SUGGESTIONS.EMOJI.UP_VOTE)?.count || 1) - 1;
+  const downVotes = (message.reactions.resolve(SUGGESTIONS.EMOJI.DOWN_VOTE)?.count || 1) - 1;
 
-  async messageRun(message, args, data) {
-    const sub = args[0];
-    let response;
-
-    // status
-    if (sub == "status") {
-      const status = args[1]?.toUpperCase();
-      if (!status || !["ON", "OFF"].includes(status))
-        return message.safeReply("Invalid status. Value must be `on/off`");
-      response = await setStatus(data.settings, status);
-    }
-
-    // channel
-    else if (sub == "channel") {
-      const input = args[1];
-      let matched = message.guild.findMatchingChannels(input);
-      if (matched.length == 0) response = `No matching channels found for ${input}`;
-      else if (matched.length > 1) response = `Multiple channels found for ${input}. Please be more specific.`;
-      else response = await setChannel(data.settings, matched[0]);
-    }
-
-    // appch
-    else if (sub == "appch") {
-      const input = args[1];
-      let matched = message.guild.findMatchingChannels(input);
-      if (matched.length == 0) response = `No matching channels found for ${input}`;
-      else if (matched.length > 1) response = `Multiple channels found for ${input}. Please be more specific.`;
-      else response = await setApprovedChannel(data.settings, matched[0]);
-    }
-
-    // appch
-    else if (sub == "rejch") {
-      const input = args[1];
-      let matched = message.guild.findMatchingChannels(input);
-      if (matched.length == 0) response = `No matching channels found for ${input}`;
-      else if (matched.length > 1) response = `Multiple channels found for ${input}. Please be more specific.`;
-      else response = await setRejectedChannel(data.settings, matched[0]);
-    }
-
-    // approve
-    else if (sub == "approve") {
-      const input = args[1];
-      let matched = message.guild.findMatchingChannels(input);
-      if (matched.length == 0) response = `No matching channels found for ${input}`;
-      else if (matched.length > 1) response = `Multiple channels found for ${input}. Please be more specific.`;
-      else {
-        const messageId = args[2];
-        const reason = args.slice(3).join(" ");
-        response = await approveSuggestion(message.member, matched[0], messageId, reason);
-      }
-    }
-
-    // reject
-    else if (sub == "reject") {
-      const input = args[1];
-      let matched = message.guild.findMatchingChannels(input);
-      if (matched.length == 0) response = `No matching channels found for ${input}`;
-      else if (matched.length > 1) response = `Multiple channels found for ${input}. Please be more specific.`;
-      else {
-        const messageId = args[2];
-        const reason = args.slice(3).join(" ");
-        response = await rejectSuggestion(message.member, matched[0], messageId, reason);
-      }
-    }
-
-    // staffadd
-    else if (sub == "staffadd") {
-      const input = args[1];
-      let matched = message.guild.findMatchingRoles(input);
-      if (matched.length == 0) response = `No matching roles found for ${input}`;
-      else if (matched.length > 1) response = `Multiple roles found for ${input}. Please be more specific.`;
-      else response = await addStaffRole(data.settings, matched[0]);
-    }
-
-    // staffremove
-    else if (sub == "staffremove") {
-      const input = args[1];
-      let matched = message.guild.findMatchingRoles(input);
-      if (matched.length == 0) response = `No matching roles found for ${input}`;
-      else if (matched.length > 1) response = `Multiple roles found for ${input}. Please be more specific.`;
-      else response = await removeStaffRole(data.settings, matched[0]);
-    }
-
-    // else
-    else response = "Not a valid subcommand";
-    await message.safeReply(response);
-  },
-
-  async interactionRun(interaction, data) {
-    const sub = interaction.options.getSubcommand();
-    let response;
-
-    // status
-    if (sub == "status") {
-      const status = interaction.options.getString("status");
-      response = await setStatus(data.settings, status);
-    }
-
-    // channel
-    else if (sub == "channel") {
-      const channel = interaction.options.getChannel("channel_name");
-      response = await setChannel(data.settings, channel);
-    }
-
-    // app_channel
-    else if (sub == "appch") {
-      const channel = interaction.options.getChannel("channel_name");
-      response = await setApprovedChannel(data.settings, channel);
-    }
-
-    // rej_channel
-    else if (sub == "rejch") {
-      const channel = interaction.options.getChannel("channel_name");
-      response = await setRejectedChannel(data.settings, channel);
-    }
-
-    // approve
-    else if (sub == "approve") {
-      const channel = interaction.options.getChannel("channel_name");
-      const messageId = interaction.options.getString("message_id");
-      response = await approveSuggestion(interaction.member, channel, messageId);
-    }
-
-    // reject
-    else if (sub == "reject") {
-      const channel = interaction.options.getChannel("channel_name");
-      const messageId = interaction.options.getString("message_id");
-      response = await rejectSuggestion(interaction.member, channel, messageId);
-    }
-
-    // staffadd
-    else if (sub == "staffadd") {
-      const role = interaction.options.getRole("role");
-      response = await addStaffRole(data.settings, role);
-    }
-
-    // staffremove
-    else if (sub == "staffremove") {
-      const role = interaction.options.getRole("role");
-      response = await removeStaffRole(data.settings, role);
-    }
-
-    // else
-    else response = "Not a valid subcommand";
-    await interaction.followUp(response);
-  },
+  return [upVotes, downVotes];
 };
 
-async function setStatus(settings, status) {
-  const enabled = status.toUpperCase() === "ON" ? true : false;
-  settings.suggestions.enabled = enabled;
-  await settings.save();
-  return `Suggestion system is now ${enabled ? "enabled" : "disabled"}`;
+/**
+ * @param {number} upVotes
+ * @param {number} downVotes
+ */
+const getVotesMessage = (upVotes, downVotes) => {
+  const total = upVotes + downVotes;
+  if (total === 0) {
+    return stripIndents`
+  _Upvotes: NA_
+  _Downvotes: NA_
+  `;
+  } else {
+    return stripIndents`
+  _Upvotes: ${upVotes} [${Math.round((upVotes / (upVotes + downVotes)) * 100)}%]_
+  _Downvotes: ${downVotes} [${Math.round((downVotes / (upVotes + downVotes)) * 100)}%]_
+  `;
+  }
+};
+
+const hasPerms = (member, settings) => {
+  return (
+    member.permissions.has("ManageGuild") ||
+    member.roles.cache.find((r) => settings.suggestions.staff_roles.includes(r.id))
+  );
+};
+
+/**
+ * @param {import('discord.js').GuildMember} member
+ * @param {import('discord.js').TextBasedChannel} channel
+ * @param {string} messageId
+ * @param {string} [reason]
+ */
+async function approveSuggestion(member, channel, messageId, reason) {
+  const { guild } = member;
+  const settings = await getSettings(guild);
+
+  // validate permissions
+  if (!hasPerms(member, settings)) return "You don't have permission to approve suggestions!";
+
+  // validate if document exists
+  const doc = await findSuggestion(guild.id, messageId);
+  if (!doc) return "Suggestion not found";
+  if (doc.status === "APPROVED") return "Suggestion already approved";
+
+  /**
+   * @type {import('discord.js').Message}
+   */
+  let message;
+  try {
+    message = await channel.messages.fetch({ message: messageId, force: true });
+  } catch (err) {
+    return "Suggestion message not found";
+  }
+
+  let buttonsRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("SUGGEST_APPROVE")
+      .setLabel("Approve")
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(true),
+    new ButtonBuilder().setCustomId("SUGGEST_REJECT").setLabel("Reject").setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId("SUGGEST_DELETE").setLabel("Delete").setStyle(ButtonStyle.Secondary)
+  );
+
+  const approvedEmbed = new EmbedBuilder()
+    .setDescription(message.embeds[0].data.description)
+    .setColor(SUGGESTIONS.APPROVED_EMBED)
+    .setAuthor({ name: "Suggestion Approved" })
+    .setFooter({ text: `Approved By ${member.user.username}`, iconURL: member.displayAvatarURL() })
+    .setTimestamp();
+
+  const fields = [];
+
+  // add stats if it doesn't exist
+  const statsField = message.embeds[0].fields.find((field) => field.name === "Stats");
+  if (!statsField) {
+    const [upVotes, downVotes] = getStats(message);
+    doc.stats.upvotes = upVotes;
+    doc.stats.downvotes = downVotes;
+    fields.push({ name: "Stats", value: getVotesMessage(upVotes, downVotes) });
+  } else {
+    fields.push(statsField);
+  }
+
+  // update reason
+  if (reason) fields.push({ name: "Reason", value: "```" + reason + "```" });
+
+  approvedEmbed.addFields(fields);
+
+  try {
+    doc.status = "APPROVED";
+    doc.status_updates.push({ user_id: member.id, status: "APPROVED", reason, timestamp: new Date() });
+
+    let approveChannel;
+    if (settings.suggestions.approved_channel) {
+      approveChannel = guild.channels.cache.get(settings.suggestions.approved_channel);
+    }
+
+    // suggestions-approve channel is not configured
+    if (!approveChannel) {
+      await message.edit({ embeds: [approvedEmbed], components: [buttonsRow] });
+      await message.reactions.removeAll();
+    }
+
+    // suggestions-approve channel is configured
+    else {
+      const sent = await approveChannel.send({ embeds: [approvedEmbed], components: [buttonsRow] });
+      doc.channel_id = approveChannel.id;
+      doc.message_id = sent.id;
+      await message.delete();
+    }
+
+    await doc.save();
+    return "Suggestion approved";
+  } catch (ex) {
+    guild.client.logger.error("approveSuggestion", ex);
+    return "Failed to approve suggestion";
+  }
 }
 
-async function setChannel(settings, channel) {
-  if (!channel) {
-    settings.suggestions.channel_id = null;
-    await settings.save();
-    return "Suggestion system is now disabled";
+/**
+ * @param {import('discord.js').GuildMember} member
+ * @param {import('discord.js').TextBasedChannel} channel
+ * @param {string} messageId
+ * @param {string} [reason]
+ */
+async function rejectSuggestion(member, channel, messageId, reason) {
+  const { guild } = member;
+  const settings = await getSettings(guild);
+
+  // validate permissions
+  if (!hasPerms(member, settings)) return "You don't have permission to reject suggestions!";
+
+  // validate if document exists
+  const doc = await findSuggestion(guild.id, messageId);
+  if (!doc) return "Suggestion not found";
+  if (doc.is_rejected) return "Suggestion already rejected";
+
+  let message;
+  try {
+    message = await channel.messages.fetch({ message: messageId });
+  } catch (err) {
+    return "Suggestion message not found";
   }
 
-  if (!channel.permissionsFor(channel.guild.members.me).has(CHANNEL_PERMS)) {
-    return `I need the following permissions in ${channel}\n${parsePermissions(CHANNEL_PERMS)}`;
+  let buttonsRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("SUGGEST_APPROVE").setLabel("Approve").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId("SUGGEST_REJECT").setLabel("Reject").setStyle(ButtonStyle.Danger).setDisabled(true),
+    new ButtonBuilder().setCustomId("SUGGEST_DELETE").setLabel("Delete").setStyle(ButtonStyle.Secondary)
+  );
+
+  const rejectedEmbed = new EmbedBuilder()
+    .setDescription(message.embeds[0].data.description)
+    .setColor(SUGGESTIONS.DENIED_EMBED)
+    .setAuthor({ name: "Suggestion Rejected" })
+    .setFooter({ text: `Rejected By ${member.user.username}`, iconURL: member.displayAvatarURL() })
+    .setTimestamp();
+
+  const fields = [];
+
+  // add stats if it doesn't exist
+  const statsField = message.embeds[0].fields.find((field) => field.name === "Stats");
+  if (!statsField) {
+    const [upVotes, downVotes] = getStats(message);
+    doc.stats.upvotes = upVotes;
+    doc.stats.downvotes = downVotes;
+    fields.push({ name: "Stats", value: getVotesMessage(upVotes, downVotes) });
+  } else {
+    fields.push(statsField);
   }
 
-  settings.suggestions.channel_id = channel.id;
-  await settings.save();
-  return `Suggestions will now be sent to ${channel}`;
+  // update reason
+  if (reason) fields.push({ name: "Reason", value: "```" + reason + "```" });
+
+  rejectedEmbed.addFields(fields);
+
+  try {
+    doc.status = "REJECTED";
+    doc.status_updates.push({ user_id: member.id, status: "REJECTED", reason, timestamp: new Date() });
+
+    let rejectChannel;
+    if (settings.suggestions.rejected_channel) {
+      rejectChannel = guild.channels.cache.get(settings.suggestions.rejected_channel);
+    }
+
+    // suggestions-reject channel is not configured
+    if (!rejectChannel) {
+      await message.edit({ embeds: [rejectedEmbed], components: [buttonsRow] });
+      await message.reactions.removeAll();
+    }
+
+    // suggestions-reject channel is configured
+    else {
+      const sent = await rejectChannel.send({ embeds: [rejectedEmbed], components: [buttonsRow] });
+      doc.channel_id = rejectChannel.id;
+      doc.message_id = sent.id;
+      await message.delete();
+    }
+
+    await doc.save();
+
+    return "Suggestion rejected";
+  } catch (ex) {
+    guild.client.logger.error("rejectSuggestion", ex);
+    return "Failed to reject suggestion";
+  }
 }
 
-async function setApprovedChannel(settings, channel) {
-  if (!channel) {
-    settings.suggestions.approved_channel = null;
-    await settings.save();
-    return "Suggestion approved channel is now disabled";
-  }
+/**
+ * @param {import('discord.js').GuildMember} member
+ * @param {import('discord.js').TextBasedChannel} channel
+ * @param {string} messageId
+ * @param {string} [reason]
+ */
+async function deleteSuggestion(member, channel, messageId, reason) {
+  const { guild } = member;
+  const settings = await getSettings(guild);
 
-  if (!channel.permissionsFor(channel.guild.members.me).has(CHANNEL_PERMS)) {
-    return `I need the following permissions in ${channel}\n${parsePermissions(CHANNEL_PERMS)}`;
-  }
+  // validate permissions
+  if (!hasPerms(member, settings)) return "You don't have permission to delete suggestions!";
 
-  settings.suggestions.approved_channel = channel.id;
-  await settings.save();
-  return `Approved suggestions will now be sent to ${channel}`;
+  try {
+    await channel.messages.delete(messageId);
+    await deleteSuggestionDb(guild.id, messageId, member.id, reason);
+    return "Suggestion deleted";
+  } catch (ex) {
+    guild.client.logger.error("deleteSuggestion", ex);
+    return "Failed to delete suggestion! Please delete manually";
+  }
 }
 
-async function setRejectedChannel(settings, channel) {
-  if (!channel) {
-    settings.suggestions.rejected_channel = null;
-    await settings.save();
-    return "Suggestion rejected channel is now disabled";
-  }
-
-  if (!channel.permissionsFor(channel.guild.members.me).has(CHANNEL_PERMS)) {
-    return `I need the following permissions in ${channel}\n${parsePermissions(CHANNEL_PERMS)}`;
-  }
-
-  settings.suggestions.rejected_channel = channel.id;
-  await settings.save();
-  return `Rejected suggestions will now be sent to ${channel}`;
+/**
+ * @param {import('discord.js').ButtonInteraction} interaction
+ */
+async function handleApproveBtn(interaction) {
+  await interaction.showModal(
+    new ModalBuilder({
+      title: "Approve Suggestion",
+      customId: "SUGGEST_APPROVE_MODAL",
+      components: [
+        new ActionRowBuilder().addComponents([
+          new TextInputBuilder()
+            .setCustomId("reason")
+            .setLabel("reason")
+            .setStyle(TextInputStyle.Paragraph)
+            .setMinLength(4),
+        ]),
+      ],
+    })
+  );
 }
 
-async function addStaffRole(settings, role) {
-  if (settings.suggestions.staff_roles.includes(role.id)) {
-    return `\`${role.name}\` is already a staff role`;
-  }
-  settings.suggestions.staff_roles.push(role.id);
-  await settings.save();
-  return `\`${role.name}\` is now a staff role`;
+/**
+ * @param {import('discord.js').ModalSubmitInteraction} modal
+ */
+async function handleApproveModal(modal) {
+  await modal.deferReply({ ephemeral: true });
+  const reason = modal.fields.getTextInputValue("reason");
+  const response = await approveSuggestion(modal.member, modal.channel, modal.message.id, reason);
+  await modal.followUp(response);
 }
 
-async function removeStaffRole(settings, role) {
-  if (!settings.suggestions.staff_roles.includes(role.id)) {
-    return `${role} is not a staff role`;
-  }
-  settings.suggestions.staff_roles.splice(settings.suggestions.staff_roles.indexOf(role.id), 1);
-  await settings.save();
-  return `\`${role.name}\` is no longer a staff role`;
+/**
+ * @param {import('discord.js').ButtonInteraction} interaction
+ */
+async function handleRejectBtn(interaction) {
+  await interaction.showModal(
+    new ModalBuilder({
+      title: "Reject Suggestion",
+      customId: "SUGGEST_REJECT_MODAL",
+      components: [
+        new ActionRowBuilder().addComponents([
+          new TextInputBuilder()
+            .setCustomId("reason")
+            .setLabel("reason")
+            .setStyle(TextInputStyle.Paragraph)
+            .setMinLength(4),
+        ]),
+      ],
+    })
+  );
 }
+
+/**
+ * @param {import('discord.js').ModalSubmitInteraction} modal
+ */
+async function handleRejectModal(modal) {
+  await modal.deferReply({ ephemeral: true });
+  const reason = modal.fields.getTextInputValue("reason");
+  const response = await rejectSuggestion(modal.member, modal.channel, modal.message.id, reason);
+  await modal.followUp(response);
+}
+
+/**
+ * @param {import('discord.js').ButtonInteraction} interaction
+ */
+async function handleDeleteBtn(interaction) {
+  await interaction.showModal(
+    new ModalBuilder({
+      title: "Delete Suggestion",
+      customId: "SUGGEST_DELETE_MODAL",
+      components: [
+        new ActionRowBuilder().addComponents([
+          new TextInputBuilder()
+            .setCustomId("reason")
+            .setLabel("reason")
+            .setStyle(TextInputStyle.Paragraph)
+            .setMinLength(4),
+        ]),
+      ],
+    })
+  );
+}
+
+/**
+ * @param {import('discord.js').ModalSubmitInteraction} modal
+ */
+async function handleDeleteModal(modal) {
+  await modal.deferReply({ ephemeral: true });
+  const reason = modal.fields.getTextInputValue("reason");
+  const response = await deleteSuggestion(modal.member, modal.channel, modal.message.id, reason);
+  await modal.followUp({ content: response, ephemeral: true });
+}
+
+module.exports = {
+  handleApproveBtn,
+  handleApproveModal,
+  handleRejectBtn,
+  handleRejectModal,
+  handleDeleteBtn,
+  handleDeleteModal,
+  approveSuggestion,
+  rejectSuggestion,
+  deleteSuggestion,
+};

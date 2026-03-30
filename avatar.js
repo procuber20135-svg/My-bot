@@ -1,10 +1,24 @@
-const { EmbedBuilder } = require("discord.js");
+const { EmbedBuilder, ApplicationCommandType } = require("discord.js");
 const { EMBED_COLORS } = require("@root/config");
 
 /**
- * @param {import('discord.js').User} user
+ * @type {import('@structures/BaseContext')}
  */
-module.exports = (user) => {
+module.exports = {
+  name: "avatar",
+  description: "displays avatar information about the user",
+  type: ApplicationCommandType.User,
+  enabled: true,
+  ephemeral: true,
+
+  async run(interaction) {
+    const user = await interaction.client.users.fetch(interaction.targetId);
+    const response = getAvatar(user);
+    await interaction.followUp(response);
+  },
+};
+
+function getAvatar(user) {
   const x64 = user.displayAvatarURL({ extension: "png", size: 64 });
   const x128 = user.displayAvatarURL({ extension: "png", size: 128 });
   const x256 = user.displayAvatarURL({ extension: "png", size: 256 });
@@ -28,4 +42,4 @@ module.exports = (user) => {
   return {
     embeds: [embed],
   };
-};
+}

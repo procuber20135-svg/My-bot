@@ -1,339 +1,219 @@
-const { EmbedBuilder, ApplicationCommandOptionType, ChannelType } = require("discord.js");
-const { EMBED_COLORS } = require("@root/config.js");
-const { stripIndent } = require("common-tags");
+const { EmbedBuilder } = require("discord.js");
+const { containsLink, containsDiscordInvite } = require("@helpers/Utils");
+const { getMember } = require("@schemas/Member");
+const { addModAction } = require("@helpers/ModUtils");
+const { AUTOMOD } = require("@root/config");
+const { addAutoModLogToDb } = require("@schemas/AutomodLogs");
+
+const antispamCache = new Map();
+const MESSAGE_SPAM_THRESHOLD = 3000;
+
+// Cleanup the cache
+setInterval(
+  () => {
+    antispamCache.forEach((value, key) => {
+      if (Date.now() - value.timestamp > MESSAGE_SPAM_THRESHOLD) {
+        antispamCache.delete(key);
+      }
+    });
+  },
+  10 * 60 * 1000
+);
 
 /**
- * @type {import("@structures/Command")}
+ * Check if the message needs to be moderated and has required permissions
+ * @param {import('discord.js').Message} message
  */
-module.exports = {
-  name: "automod",
-  description: "various automod configuration",
-  category: "AUTOMOD",
-  userPermissions: ["ManageGuild"],
-  command: {
-    enabled: true,
-    minArgsCount: 1,
-    subcommands: [
-      {
-        trigger: "status",
-        description: "check automod configuration for this guild",
-      },
-      {
-        trigger: "strikes <number>",
-        description: "maximum number of strikes a member can receive before taking an action",
-      },
-      {
-        trigger: "action <TIMEOUT|KICK|BAN>",
-        description: "set action to be performed after receiving maximum strikes",
-      },
-      {
-        trigger: "debug <on|off>",
-        description: "turns on automod for messages sent by admins and moderators",
-      },
-      {
-        trigger: "whitelist",
-        description: "list of channels that are whitelisted",
-      },
-      {
-        trigger: "whitelistadd <channel>",
-        description: "add a channel to the whitelist",
-      },
-      {
-        trigger: "whitelistremove <channel>",
-        description: "remove a channel from the whitelist",
-      },
-    ],
-  },
-  slashCommand: {
-    enabled: true,
-    ephemeral: true,
-    options: [
-      {
-        name: "status",
-        description: "check automod configuration",
-        type: ApplicationCommandOptionType.Subcommand,
-      },
-      {
-        name: "strikes",
-        description: "set maximum number of strikes before taking an action",
-        type: ApplicationCommandOptionType.Subcommand,
-        options: [
-          {
-            name: "amount",
-            description: "number of strikes (default 5)",
-            required: true,
-            type: ApplicationCommandOptionType.Integer,
-          },
-        ],
-      },
-      {
-        name: "action",
-        description: "set action to be performed after receiving maximum strikes",
-        type: ApplicationCommandOptionType.Subcommand,
-        options: [
-          {
-            name: "action",
-            description: "action to perform",
-            type: ApplicationCommandOptionType.String,
-            required: true,
-            choices: [
-              {
-                name: "TIMEOUT",
-                value: "TIMEOUT",
-              },
-              {
-                name: "KICK",
-                value: "KICK",
-              },
-              {
-                name: "BAN",
-                value: "BAN",
-              },
-            ],
-          },
-        ],
-      },
-      {
-        name: "debug",
-        description: "enable/disable automod for messages sent by admins & moderators",
-        type: ApplicationCommandOptionType.Subcommand,
-        options: [
-          {
-            name: "status",
-            description: "configuration status",
-            required: true,
-            type: ApplicationCommandOptionType.String,
-            choices: [
-              {
-                name: "ON",
-                value: "ON",
-              },
-              {
-                name: "OFF",
-                value: "OFF",
-              },
-            ],
-          },
-        ],
-      },
-      {
-        name: "whitelist",
-        description: "view whitelisted channels",
-        type: ApplicationCommandOptionType.Subcommand,
-      },
-      {
-        name: "whitelistadd",
-        description: "add a channel to the whitelist",
-        type: ApplicationCommandOptionType.Subcommand,
-        options: [
-          {
-            name: "channel",
-            description: "channel to add",
-            required: true,
-            type: ApplicationCommandOptionType.Channel,
-            channelTypes: [ChannelType.GuildText],
-          },
-        ],
-      },
-      {
-        name: "whitelistremove",
-        description: "remove a channel from the whitelist",
-        type: ApplicationCommandOptionType.Subcommand,
-        options: [
-          {
-            name: "channel",
-            description: "channel to remove",
-            required: true,
-            type: ApplicationCommandOptionType.Channel,
-            channelTypes: [ChannelType.GuildText],
-          },
-        ],
-      },
-    ],
-  },
+const shouldModerate = (message) => {
+  const { member, guild, channel } = message;
 
-  async messageRun(message, args, data) {
-    const input = args[0].toLowerCase();
-    const settings = data.settings;
+  // Ignore if bot cannot delete channel messages
+  if (!channel.permissionsFor(guild.members.me)?.has("ManageMessages")) return false;
 
-    let response;
-    if (input === "status") {
-      response = await getStatus(settings, message.guild);
-    } else if (input === "strikes") {
-      const strikes = args[1];
-      if (isNaN(strikes) || Number.parseInt(strikes) < 1) {
-        return message.safeReply("Strikes must be a valid number greater than 0");
-      }
-      response = await setStrikes(settings, strikes);
-    } else if (input === "action") {
-      const action = args[1].toUpperCase();
-      if (!action || !["TIMEOUT", "KICK", "BAN"].includes(action))
-        return message.safeReply("Not a valid action. Action can be `Timeout`/`Kick`/`Ban`");
-      response = await setAction(settings, message.guild, action);
-    } else if (input === "debug") {
-      const status = args[1].toLowerCase();
-      if (!["on", "off"].includes(status)) return message.safeReply("Invalid status. Value must be `on/off`");
-      response = await setDebug(settings, status);
-    }
+  // Ignore Possible Guild Moderators
+  if (member.permissions.has(["KickMembers", "BanMembers", "ManageGuild"])) return false;
 
-    // whitelist
-    else if (input === "whitelist") {
-      response = getWhitelist(message.guild, settings);
-    }
-
-    // whitelist add
-    else if (input === "whitelistadd") {
-      const match = message.guild.findMatchingChannels(args[1]);
-      if (!match.length) return message.safeReply(`No channel found matching ${args[1]}`);
-      response = await whiteListAdd(settings, match[0].id);
-    }
-
-    // whitelist remove
-    else if (input === "whitelistremove") {
-      const match = message.guild.findMatchingChannels(args[1]);
-      if (!match.length) return message.safeReply(`No channel found matching ${args[1]}`);
-      response = await whiteListRemove(settings, match[0].id);
-    }
-
-    //
-    else response = "Invalid command usage!";
-    await message.safeReply(response);
-  },
-
-  async interactionRun(interaction, data) {
-    const sub = interaction.options.getSubcommand();
-    const settings = data.settings;
-
-    let response;
-
-    if (sub === "status") response = await getStatus(settings, interaction.guild);
-    else if (sub === "strikes") response = await setStrikes(settings, interaction.options.getInteger("amount"));
-    else if (sub === "action")
-      response = await setAction(settings, interaction.guild, interaction.options.getString("action"));
-    else if (sub === "debug") response = await setDebug(settings, interaction.options.getString("status"));
-    else if (sub === "whitelist") {
-      response = getWhitelist(interaction.guild, settings);
-    } else if (sub === "whitelistadd") {
-      const channelId = interaction.options.getChannel("channel").id;
-      response = await whiteListAdd(settings, channelId);
-    } else if (sub === "whitelistremove") {
-      const channelId = interaction.options.getChannel("channel").id;
-      response = await whiteListRemove(settings, channelId);
-    }
-
-    await interaction.followUp(response);
-  },
+  // Ignore Possible Channel Moderators
+  if (channel.permissionsFor(message.member).has("ManageMessages")) return false;
+  return true;
 };
 
-async function getStatus(settings, guild) {
+/**
+ * Perform moderation on the message
+ * @param {import('discord.js').Message} message
+ * @param {object} settings
+ */
+async function performAutomod(message, settings) {
   const { automod } = settings;
 
-  const logChannel = settings.modlog_channel
-    ? guild.channels.cache.get(settings.modlog_channel).toString()
-    : "Not Configured";
+  if (automod.wh_channels.includes(message.channelId)) return;
+  if (!automod.debug && !shouldModerate(message)) return;
 
-  // String Builder
-  let desc = stripIndent`
-    ❯ **Max Lines**: ${automod.max_lines || "NA"}
-    ❯ **Anti-Massmention**: ${automod.anti_massmention > 0 ? "✓" : "✕"}
-    ❯ **Anti-Attachment**: ${automod.anti_attachment ? "✓" : "✕"}
-    ❯ **Anti-Links**: ${automod.anti_links ? "✓" : "✕"}
-    ❯ **Anti-Invites**: ${automod.anti_invites ? "✓" : "✕"}
-    ❯ **Anti-Spam**: ${automod.anti_spam ? "✓" : "✕"}
-    ❯ **Anti-Ghostping**: ${automod.anti_ghostping ? "✓" : "✕"}
-  `;
+  const { channel, member, guild, content, author, mentions } = message;
+  const logChannel = settings.modlog_channel ? channel.guild.channels.cache.get(settings.modlog_channel) : null;
 
-  const embed = new EmbedBuilder()
-    .setAuthor({ name: "Automod Configuration", iconURL: guild.iconURL() })
-    .setColor(EMBED_COLORS.BOT_EMBED)
-    .setDescription(desc)
-    .addFields(
-      {
-        name: "Log Channel",
-        value: logChannel,
+  let shouldDelete = false;
+  let strikesTotal = 0;
+
+  const fields = [];
+
+  // Max mentions
+  if (mentions.members.size > automod.max_mentions) {
+    fields.push({ name: "Mentions", value: `${mentions.members.size}/${automod.max_mentions}`, inline: true });
+    // strikesTotal += mentions.members.size - automod.max_mentions;
+    strikesTotal += 1;
+  }
+
+  // Maxrole mentions
+  if (mentions.roles.size > automod.max_role_mentions) {
+    fields.push({ name: "RoleMentions", value: `${mentions.roles.size}/${automod.max_role_mentions}`, inline: true });
+    // strikesTotal += mentions.roles.size - automod.max_role_mentions;
+    strikesTotal += 1;
+  }
+
+  if (automod.anti_massmention > 0) {
+    // check everyone mention
+    if (mentions.everyone) {
+      fields.push({ name: "Everyone Mention", value: "✓", inline: true });
+      strikesTotal += 1;
+    }
+
+    // check user/role mentions
+    if (mentions.users.size + mentions.roles.size > automod.anti_massmention) {
+      fields.push({
+        name: "User/Role Mentions",
+        value: `${mentions.users.size + mentions.roles.size}/${automod.anti_massmention}`,
         inline: true,
-      },
-      {
-        name: "Max Strikes",
-        value: automod.strikes.toString(),
-        inline: true,
-      },
-      {
-        name: "Action",
-        value: automod.action,
-        inline: true,
-      },
-      {
-        name: "Debug",
-        value: automod.debug ? "✓" : "✕",
-        inline: true,
+      });
+      // strikesTotal += mentions.users.size + mentions.roles.size - automod.anti_massmention;
+      strikesTotal += 1;
+    }
+  }
+
+  // Max Lines
+  if (automod.max_lines > 0) {
+    const count = content.split("\n").length;
+    if (count > automod.max_lines) {
+      fields.push({ name: "New Lines", value: `${count}/${automod.max_lines}`, inline: true });
+      shouldDelete = true;
+      // strikesTotal += Math.ceil((count - automod.max_lines) / automod.max_lines);
+      strikesTotal += 1;
+    }
+  }
+
+  // Anti Attachments
+  if (automod.anti_attachments) {
+    if (message.attachments.size > 0) {
+      fields.push({ name: "Attachments Found", value: "✓", inline: true });
+      shouldDelete = true;
+      strikesTotal += 1;
+    }
+  }
+
+  // Anti links
+  if (automod.anti_links) {
+    if (containsLink(content)) {
+      fields.push({ name: "Links Found", value: "✓", inline: true });
+      shouldDelete = true;
+      strikesTotal += 1;
+    }
+  }
+
+  // Anti Spam
+  if (!automod.anti_links && automod.anti_spam) {
+    if (containsLink(content)) {
+      const key = author.id + "|" + message.guildId;
+      if (antispamCache.has(key)) {
+        let antispamInfo = antispamCache.get(key);
+        if (
+          antispamInfo.channelId !== message.channelId &&
+          antispamInfo.content === content &&
+          Date.now() - antispamInfo.timestamp < MESSAGE_SPAM_THRESHOLD
+        ) {
+          fields.push({ name: "AntiSpam Detection", value: "✓", inline: true });
+          shouldDelete = true;
+          strikesTotal += 1;
+        }
+      } else {
+        let antispamInfo = {
+          channelId: message.channelId,
+          content,
+          timestamp: Date.now(),
+        };
+        antispamCache.set(key, antispamInfo);
       }
-    );
-
-  return { embeds: [embed] };
-}
-
-async function setStrikes(settings, strikes) {
-  settings.automod.strikes = strikes;
-  await settings.save();
-  return `Configuration saved! Maximum strikes is set to ${strikes}`;
-}
-
-async function setAction(settings, guild, action) {
-  if (action === "TIMEOUT") {
-    if (!guild.members.me.permissions.has("ModerateMembers")) {
-      return "I do not permission to timeout members";
     }
   }
 
-  if (action === "KICK") {
-    if (!guild.members.me.permissions.has("KickMembers")) {
-      return "I do not have permission to kick members";
+  // Anti Invites
+  if (!automod.anti_links && automod.anti_invites) {
+    if (containsDiscordInvite(content)) {
+      fields.push({ name: "Discord Invites", value: "✓", inline: true });
+      shouldDelete = true;
+      strikesTotal += 1;
     }
   }
 
-  if (action === "BAN") {
-    if (!guild.members.me.permissions.has("BanMembers")) {
-      return "I do not have permission to ban members";
+  // delete message if deletable
+  if (shouldDelete && message.deletable) {
+    message
+      .delete()
+      .then(() => channel.safeSend("> Auto-Moderation! Message deleted", 5))
+      .catch(() => {});
+  }
+
+  if (strikesTotal > 0) {
+    // add strikes to member
+    const memberDb = await getMember(guild.id, author.id);
+    memberDb.strikes += strikesTotal;
+
+    // log to db
+    const reason = fields.map((field) => field.name + ": " + field.value).join("\n");
+    addAutoModLogToDb(member, content, reason, strikesTotal).catch(() => {});
+
+    // send automod log
+    if (logChannel) {
+      const logEmbed = new EmbedBuilder()
+        .setAuthor({ name: "Auto Moderation" })
+        .setThumbnail(author.displayAvatarURL())
+        .setColor(AUTOMOD.LOG_EMBED)
+        .addFields(fields)
+        .setDescription(`**Channel:** ${channel.toString()}\n**Content:**\n${content}`)
+        .setFooter({
+          text: `By ${author.username} | ${author.id}`,
+          iconURL: author.avatarURL(),
+        });
+
+      logChannel.safeSend({ embeds: [logEmbed] });
     }
+
+    // DM strike details
+    const strikeEmbed = new EmbedBuilder()
+      .setColor(AUTOMOD.DM_EMBED)
+      .setThumbnail(guild.iconURL())
+      .setAuthor({ name: "Auto Moderation" })
+      .addFields(fields)
+      .setDescription(
+        `You have received ${strikesTotal} strikes!\n\n` +
+          `**Guild:** ${guild.name}\n` +
+          `**Total Strikes:** ${memberDb.strikes} out of ${automod.strikes}`
+      );
+
+    author.send({ embeds: [strikeEmbed] }).catch((ex) => {});
+
+    // check if max strikes are received
+    if (memberDb.strikes >= automod.strikes) {
+      // Reset Strikes
+      memberDb.strikes = 0;
+
+      // Add Moderation Action
+      await addModAction(guild.members.me, member, "Automod: Max strikes received", automod.action).catch(() => {});
+    }
+
+    await memberDb.save();
   }
-
-  settings.automod.action = action;
-  await settings.save();
-  return `Configuration saved! Automod action is set to ${action}`;
 }
 
-async function setDebug(settings, input) {
-  const status = input.toLowerCase() === "on" ? true : false;
-  settings.automod.debug = status;
-  await settings.save();
-  return `Configuration saved! Automod debug is now ${status ? "enabled" : "disabled"}`;
-}
-
-function getWhitelist(guild, settings) {
-  const whitelist = settings.automod.wh_channels;
-  if (!whitelist || !whitelist.length) return "No channels are whitelisted";
-
-  const channels = [];
-  for (const channelId of whitelist) {
-    const channel = guild.channels.cache.get(channelId);
-    if (!channel) continue;
-    if (channel) channels.push(channel.toString());
-  }
-
-  return `Whitelisted channels: ${channels.join(", ")}`;
-}
-
-async function whiteListAdd(settings, channelId) {
-  if (settings.automod.wh_channels.includes(channelId)) return "Channel is already whitelisted";
-  settings.automod.wh_channels.push(channelId);
-  await settings.save();
-  return `Channel whitelisted!`;
-}
-
-async function whiteListRemove(settings, channelId) {
-  if (!settings.automod.wh_channels.includes(channelId)) return "Channel is not whitelisted";
-  settings.automod.wh_channels.splice(settings.automod.wh_channels.indexOf(channelId), 1);
-  await settings.save();
-  return `Channel removed from whitelist!`;
-}
+module.exports = {
+  performAutomod,
+};
